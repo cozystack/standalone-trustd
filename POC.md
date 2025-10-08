@@ -146,3 +146,36 @@ Apply the config
 ```bash
 talosctl apply -f worker.yaml -e 127.0.0.1 -n 127.0.0.1 -i
 ```
+
+---
+
+Generate a new talosconfig:
+
+```bash
+cat > secrets.yaml <<EOT
+cluster:
+    id: null
+    secret: null
+secrets:
+    bootstraptoken: null
+    secretboxencryptionsecret: null
+trustdinfo:
+    token: null
+certs:
+    etcd:
+        crt: null
+        key: null
+    k8s:
+        crt: null
+        key: null
+    k8saggregator:
+        crt: null
+        key: null
+    k8sserviceaccount:
+        key: null
+    os:
+        crt: $(kubectl get secret kubernetes-foo-ca -o go-template='{{ index .data "tls.crt" }}')
+        key: $(kubectl get secret kubernetes-foo-ca -o go-template='{{ index .data "tls.key" }}')
+EOT
+talosctl gen config --with-secrets secrets.yaml kubernetes-foo https://kubernetes-foo:6443 -t talosconfig --force
+```
