@@ -268,7 +268,7 @@ spec:
         - --port=50001
         command:
         - /trustd
-        image: ghcr.io/kvaps/test:trustd-6
+        image: ghcr.io/kvaps/test:trustd-8
         imagePullPolicy: Always
         name: trustd
         env:
@@ -385,3 +385,26 @@ metadata:
 type: Opaque
 stringData:
   auth-token: 2k882v.z2vi7kefznukil1o
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    kamaji.clastix.io/component: service
+    kamaji.clastix.io/name: kubernetes-foo
+    kamaji.clastix.io/project: kamaji
+  name: kubernetes-foo
+spec:
+  internalTrafficPolicy: Cluster
+  ipFamilies:
+  - IPv4
+  ipFamilyPolicy: SingleStack
+  ports:
+  - name: kube-apiserver
+    port: 6443
+  - name: konnectivity-server
+    port: 8132
+  - name: trustd
+    port: 50001
+  selector:
+    kamaji.clastix.io/name: kubernetes-foo

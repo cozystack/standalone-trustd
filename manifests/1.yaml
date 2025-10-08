@@ -33,7 +33,7 @@ spec:
       additionalMetadata:
         annotations:
           nginx.ingress.kubernetes.io/ssl-passthrough: "true"
-      hostname: kubernetes-sadasd.kvaps.dev5.infra.aenix.org:443
+      hostname: kubernetes-sadasd.kvaps.dev5.infra.example.org:443
       ingressClassName: tenant-root
     service:
       serviceType: ClusterIP
@@ -47,7 +47,7 @@ spec:
       - ExternalIP
   networkProfile:
     certSANs:
-    - kubernetes-foo.kvaps.dev5.infra.aenix.org
+    - kubernetes-foo.kvaps.dev5.infra.example.org
     - 10.96.100.2
     clusterDomain: cluster.local
     podCidr: 10.243.0.0/16
