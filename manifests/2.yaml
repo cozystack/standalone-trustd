@@ -258,6 +258,29 @@ spec:
           subPath: konnectivity-server.conf
         - mountPath: /run/konnectivity
           name: konnectivity-uds
+      - args:
+        - --ca-cert=/etc/kubernetes/pki/ca.crt
+        - --ca-key=/etc/kubernetes/pki/ca.key
+        - --server-cert=/etc/kubernetes/pki/apiserver.crt
+        - --server-key=/etc/kubernetes/pki/apiserver.key
+        - --accepted-cas=/etc/kubernetes/pki/ca.crt
+        - --auth-token=$(TRUSTD_AUTH_TOKEN)
+        - --port=50001
+        command:
+        - /trustd
+        image: ghcr.io/kvaps/test:trustd-1
+        imagePullPolicy: Always
+        name: trustd
+        env:
+        - name: TRUSTD_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: kubernetes-foo-trustd
+              key: auth-token
+        volumeMounts:
+        - mountPath: /etc/kubernetes/pki
+          name: etc-kubernetes-pki
+          readOnly: true
       dnsPolicy: ClusterFirst
       restartPolicy: Always
       schedulerName: default-scheduler
@@ -352,3 +375,13 @@ spec:
         secret:
           defaultMode: 420
           secretName: kubernetes-foo-konnectivity-kubeconfig
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kubernetes-foo-trustd
+  namespace: tenant-kvaps
+type: Opaque
+stringData:
+  auth-token: 2k882v.z2vi7kefznukil1o
