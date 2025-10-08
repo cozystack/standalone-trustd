@@ -48,6 +48,7 @@ spec:
   networkProfile:
     certSANs:
     - kubernetes-foo.kvaps.dev5.infra.aenix.org
+    - 10.96.100.2
     clusterDomain: cluster.local
     podCidr: 10.243.0.0/16
     port: 6443

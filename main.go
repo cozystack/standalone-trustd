@@ -8,20 +8,27 @@ package main
 import (
 	"context"
 	"crypto/subtle"
-	"encoding/base64"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os/signal"
+	"sort"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+
+	securityapi "github.com/siderolabs/talos/pkg/machinery/api/security"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/cozystack/standalone-trustd/internal/registrator"
 	"github.com/cozystack/standalone-trustd/internal/tlsconfig"
@@ -75,10 +82,13 @@ func run() error {
 		return fmt.Errorf("failed to create TLS configuration: %w", err)
 	}
 
-	// Create gRPC server with Basic Auth interceptor
+	// Create gRPC server with logging and Basic Auth interceptors
 	server := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(tlsConfig)),
-		grpc.UnaryInterceptor(basicAuthInterceptor(*authToken)),
+		grpc.ChainUnaryInterceptor(
+			unaryLoggingInterceptor(),
+			basicAuthInterceptor(*authToken),
+		),
 	)
 
 	// Create registrator
@@ -137,7 +147,35 @@ func createListener(port int) (net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
-	return listener, nil
+	return &loggingListener{Listener: listener}, nil
+}
+
+// loggingListener wraps a net.Listener to log accepted and closed connections.
+type loggingListener struct {
+	net.Listener
+}
+
+func (l *loggingListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("accepted connection from %v", c.RemoteAddr())
+	return &loggingConn{Conn: c}, nil
+}
+
+type loggingConn struct {
+	net.Conn
+	closeOnce sync.Once
+}
+
+func (c *loggingConn) Close() error {
+	var err error
+	c.closeOnce.Do(func() {
+		err = c.Conn.Close()
+		log.Printf("closed connection from %v", c.RemoteAddr())
+	})
+	return err
 }
 
 // basicAuthInterceptor enforces Basic auth on incoming RPC calls.
@@ -149,38 +187,118 @@ func basicAuthInterceptor(expectedToken string) grpc.UnaryServerInterceptor {
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (interface{}, error) {
+		p, _ := peer.FromContext(ctx)
+
 		md, ok := metadata.FromIncomingContext(ctx)
 		if !ok {
+			log.Printf("auth failed for %s from %v: missing metadata", info.FullMethod, peerAddr(p))
 			return nil, status.Error(codes.Unauthenticated, "missing metadata")
 		}
 
-		authHeaders := md.Get("authorization")
-		if len(authHeaders) == 0 {
-			return nil, status.Error(codes.Unauthenticated, "missing authorization header")
+		// Require raw token header (Talos sends `token: <value>`)
+		tokenHeaders := md.Get("token")
+		if len(tokenHeaders) == 0 {
+			log.Printf("auth failed for %s from %v: missing token header", info.FullMethod, peerAddr(p))
+			return nil, status.Error(codes.Unauthenticated, "missing token header")
 		}
-
-		authHeader := authHeaders[0]
-		if !strings.HasPrefix(strings.ToLower(authHeader), "basic ") {
-			return nil, status.Error(codes.Unauthenticated, "invalid authorization scheme")
-		}
-
-		payload, err := base64.StdEncoding.DecodeString(strings.TrimSpace(authHeader[len("Basic "):]))
-		if err != nil {
-			return nil, status.Error(codes.Unauthenticated, "invalid basic credentials")
-		}
-
-		// format is username:password
-		parts := strings.SplitN(string(payload), ":", 2)
-		if len(parts) != 2 {
-			return nil, status.Error(codes.Unauthenticated, "invalid basic credentials format")
-		}
-
-		// username is ignored; only password must match expected token
-		providedToken := parts[1]
+		providedToken := tokenHeaders[0]
 		if subtle.ConstantTimeCompare([]byte(providedToken), []byte(expectedToken)) != 1 {
+			log.Printf("auth failed for %s from %v: invalid token", info.FullMethod, peerAddr(p))
 			return nil, status.Error(codes.Unauthenticated, "invalid token")
 		}
 
 		return handler(ctx, req)
 	}
+}
+
+// unaryLoggingInterceptor logs incoming requests, their outcome and latency.
+func unaryLoggingInterceptor() grpc.UnaryServerInterceptor {
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
+		start := time.Now()
+		p, _ := peer.FromContext(ctx)
+
+		// Log incoming metadata (with redaction)
+		if md, ok := metadata.FromIncomingContext(ctx); ok {
+			log.Printf("rpc %s from %v headers: %s", info.FullMethod, peerAddr(p), redactMetadata(md))
+		}
+
+		// Log request payload
+		if pm, ok := req.(proto.Message); ok {
+			b, _ := (protojson.MarshalOptions{Multiline: true, Indent: "  ", EmitUnpopulated: true}).Marshal(pm)
+			log.Printf("rpc %s request json:\n%s", info.FullMethod, string(b))
+		}
+		if r, ok := req.(*securityapi.CertificateRequest); ok {
+			log.Printf("rpc %s request.csr (len=%d):\n%s", info.FullMethod, len(r.Csr), string(r.Csr))
+		}
+
+		resp, err := handler(ctx, req)
+		duration := time.Since(start)
+		code := status.Code(err)
+
+		// Log response payload
+		if resp != nil {
+			if pm, ok := resp.(proto.Message); ok {
+				b, _ := (protojson.MarshalOptions{Multiline: true, Indent: "  ", EmitUnpopulated: true}).Marshal(pm)
+				log.Printf("rpc %s response json:\n%s", info.FullMethod, string(b))
+			}
+			if r, ok := resp.(*securityapi.CertificateResponse); ok {
+				log.Printf("rpc %s response.ca (len=%d):\n%s", info.FullMethod, len(r.Ca), string(r.Ca))
+				log.Printf("rpc %s response.crt (len=%d):\n%s", info.FullMethod, len(r.Crt), string(r.Crt))
+			}
+		}
+
+		if err != nil {
+			log.Printf("rpc %s from %v -> %s (%s): %v", info.FullMethod, peerAddr(p), code, duration, err)
+		} else {
+			log.Printf("rpc %s from %v -> %s (%s)", info.FullMethod, peerAddr(p), code, duration)
+		}
+
+		return resp, err
+	}
+}
+
+// peerAddr formats peer address safely for logging.
+func peerAddr(p *peer.Peer) interface{} {
+	if p == nil || p.Addr == nil {
+		return "unknown"
+	}
+	return p.Addr
+}
+
+// redactMetadata renders metadata with sensitive values masked.
+func redactMetadata(md metadata.MD) string {
+	keys := make([]string, 0, len(md))
+	for k := range md {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	b.WriteString("{")
+	for i, k := range keys {
+		values := md[k]
+		rendered := make([]string, len(values))
+		if strings.ToLower(k) == "authorization" || strings.ToLower(k) == "token" {
+			for i := range values {
+				rendered[i] = "<redacted>"
+			}
+		} else {
+			copy(rendered, values)
+		}
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(k)
+		b.WriteString("=")
+		b.WriteString("[")
+		b.WriteString(strings.Join(rendered, ", "))
+		b.WriteString("]")
+	}
+	b.WriteString("}")
+	return b.String()
 }

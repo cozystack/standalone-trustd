@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/siderolabs/crypto/x509"
 	"google.golang.org/grpc"
@@ -70,7 +71,7 @@ func (r *Registrator) Certificate(ctx context.Context, in *securityapi.Certifica
 		return nil, status.Errorf(codes.InvalidArgument, "failed to parse CSR: %s", err)
 	}
 
-	log.Printf("received CSR signing request from %s: subject %s dns names %s addresses %s", remotePeer.Addr, request.Subject, request.DNSNames, request.IPAddresses)
+	log.Printf("received CSR from %s: subject %s dns %s ips %s", remotePeer.Addr, request.Subject, request.DNSNames, request.IPAddresses)
 
 	// allow only server auth certificates
 	x509Opts := []x509.Option{
@@ -108,6 +109,15 @@ func (r *Registrator) Certificate(ctx context.Context, in *securityapi.Certifica
 		Ca:  acceptedCAs,
 		Crt: signed.X509CertificatePEM,
 	}
+
+	// Log successful certificate issuance without dumping full certificate
+	log.Printf("issued certificate for %s to %s: notBefore=%s notAfter=%s sanDNS=%v sanIP=%v",
+		signed.X509Certificate.Subject, remotePeer.Addr,
+		signed.X509Certificate.NotBefore.UTC().Format(time.RFC3339),
+		signed.X509Certificate.NotAfter.UTC().Format(time.RFC3339),
+		signed.X509Certificate.DNSNames,
+		signed.X509Certificate.IPAddresses,
+	)
 
 	return resp, nil
 }

@@ -268,7 +268,7 @@ spec:
         - --port=50001
         command:
         - /trustd
-        image: ghcr.io/kvaps/test:trustd-1
+        image: ghcr.io/kvaps/test:trustd-6
         imagePullPolicy: Always
         name: trustd
         env:
