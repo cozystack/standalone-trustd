@@ -13,8 +13,6 @@ import (
 	"log"
 	"net"
 	"os/signal"
-	"sort"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -43,6 +41,7 @@ var (
 	acceptedCAs = flag.String("accepted-cas", "", "Path to accepted CA certificates file")
 	authToken   = flag.String("auth-token", "", "Authentication token for client connections")
 	debugPort   = flag.Int("debug-port", 9983, "Debug server port")
+	verbosity   = flag.Int("v", 2, "verbosity level (0=min, 1=conn, 2=rpc, 3=payload)")
 )
 
 func main() {
@@ -108,7 +107,7 @@ func run() error {
 		return fmt.Errorf("failed to create listener: %w", err)
 	}
 
-	log.Printf("Starting standalone trustd on port %d", *port)
+	logv(0, "Starting standalone trustd on port %d", *port)
 
 	// Start server in goroutine
 	errChan := make(chan error, 1)
@@ -122,7 +121,7 @@ func run() error {
 	<-ctx.Done()
 
 	// Graceful shutdown
-	log.Println("Shutting down server...")
+	logv(0, "Shutting down server...")
 	server.GracefulStop()
 
 	// Check if server had any errors
@@ -137,7 +136,7 @@ func run() error {
 func runDebugServer(ctx context.Context, port int) {
 	// Simple debug server implementation
 	// In a real implementation, you might want to use a proper debug server
-	log.Printf("Debug server would start on port %d", port)
+	logv(1, "Debug server would start on port %d", port)
 	<-ctx.Done()
 }
 
@@ -160,7 +159,7 @@ func (l *loggingListener) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("accepted connection from %v", c.RemoteAddr())
+	logv(1, "accepted connection from %v", c.RemoteAddr())
 	return &loggingConn{Conn: c}, nil
 }
 
@@ -173,7 +172,7 @@ func (c *loggingConn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
 		err = c.Conn.Close()
-		log.Printf("closed connection from %v", c.RemoteAddr())
+		logv(1, "closed connection from %v", c.RemoteAddr())
 	})
 	return err
 }
@@ -198,12 +197,12 @@ func basicAuthInterceptor(expectedToken string) grpc.UnaryServerInterceptor {
 		// Require raw token header (Talos sends `token: <value>`)
 		tokenHeaders := md.Get("token")
 		if len(tokenHeaders) == 0 {
-			log.Printf("auth failed for %s from %v: missing token header", info.FullMethod, peerAddr(p))
+			logv(2, "auth failed for %s from %v: missing token header", info.FullMethod, peerAddr(p))
 			return nil, status.Error(codes.Unauthenticated, "missing token header")
 		}
 		providedToken := tokenHeaders[0]
 		if subtle.ConstantTimeCompare([]byte(providedToken), []byte(expectedToken)) != 1 {
-			log.Printf("auth failed for %s from %v: invalid token", info.FullMethod, peerAddr(p))
+			logv(2, "auth failed for %s from %v: invalid token", info.FullMethod, peerAddr(p))
 			return nil, status.Error(codes.Unauthenticated, "invalid token")
 		}
 
@@ -224,16 +223,22 @@ func unaryLoggingInterceptor() grpc.UnaryServerInterceptor {
 
 		// Log incoming metadata (with redaction)
 		if md, ok := metadata.FromIncomingContext(ctx); ok {
-			log.Printf("rpc %s from %v headers: %s", info.FullMethod, peerAddr(p), redactMetadata(md))
+			if *verbosity >= 2 {
+				log.Printf("rpc %s from %v headers: %v", info.FullMethod, peerAddr(p), md)
+			}
 		}
 
 		// Log request payload
 		if pm, ok := req.(proto.Message); ok {
-			b, _ := (protojson.MarshalOptions{Multiline: true, Indent: "  ", EmitUnpopulated: true}).Marshal(pm)
-			log.Printf("rpc %s request json:\n%s", info.FullMethod, string(b))
+			if *verbosity >= 3 {
+				b, _ := (protojson.MarshalOptions{Multiline: true, Indent: "  ", EmitUnpopulated: true}).Marshal(pm)
+				log.Printf("rpc %s request json:\n%s", info.FullMethod, string(b))
+			}
 		}
 		if r, ok := req.(*securityapi.CertificateRequest); ok {
-			log.Printf("rpc %s request.csr (len=%d):\n%s", info.FullMethod, len(r.Csr), string(r.Csr))
+			if *verbosity >= 3 {
+				log.Printf("rpc %s request.csr (len=%d):\n%s", info.FullMethod, len(r.Csr), string(r.Csr))
+			}
 		}
 
 		resp, err := handler(ctx, req)
@@ -243,19 +248,23 @@ func unaryLoggingInterceptor() grpc.UnaryServerInterceptor {
 		// Log response payload
 		if resp != nil {
 			if pm, ok := resp.(proto.Message); ok {
-				b, _ := (protojson.MarshalOptions{Multiline: true, Indent: "  ", EmitUnpopulated: true}).Marshal(pm)
-				log.Printf("rpc %s response json:\n%s", info.FullMethod, string(b))
+				if *verbosity >= 3 {
+					b, _ := (protojson.MarshalOptions{Multiline: true, Indent: "  ", EmitUnpopulated: true}).Marshal(pm)
+					log.Printf("rpc %s response json:\n%s", info.FullMethod, string(b))
+				}
 			}
 			if r, ok := resp.(*securityapi.CertificateResponse); ok {
-				log.Printf("rpc %s response.ca (len=%d):\n%s", info.FullMethod, len(r.Ca), string(r.Ca))
-				log.Printf("rpc %s response.crt (len=%d):\n%s", info.FullMethod, len(r.Crt), string(r.Crt))
+				if *verbosity >= 3 {
+					log.Printf("rpc %s response.ca (len=%d):\n%s", info.FullMethod, len(r.Ca), string(r.Ca))
+					log.Printf("rpc %s response.crt (len=%d):\n%s", info.FullMethod, len(r.Crt), string(r.Crt))
+				}
 			}
 		}
 
 		if err != nil {
-			log.Printf("rpc %s from %v -> %s (%s): %v", info.FullMethod, peerAddr(p), code, duration, err)
+			logv(2, "rpc %s from %v -> %s (%s): %v", info.FullMethod, peerAddr(p), code, duration, err)
 		} else {
-			log.Printf("rpc %s from %v -> %s (%s)", info.FullMethod, peerAddr(p), code, duration)
+			logv(2, "rpc %s from %v -> %s (%s)", info.FullMethod, peerAddr(p), code, duration)
 		}
 
 		return resp, err
@@ -270,35 +279,9 @@ func peerAddr(p *peer.Peer) interface{} {
 	return p.Addr
 }
 
-// redactMetadata renders metadata with sensitive values masked.
-func redactMetadata(md metadata.MD) string {
-	keys := make([]string, 0, len(md))
-	for k := range md {
-		keys = append(keys, k)
+// logv prints a log line if the current verbosity is >= level.
+func logv(level int, format string, args ...interface{}) {
+	if verbosity != nil && *verbosity >= level {
+		log.Printf(format, args...)
 	}
-	sort.Strings(keys)
-
-	var b strings.Builder
-	b.WriteString("{")
-	for i, k := range keys {
-		values := md[k]
-		rendered := make([]string, len(values))
-		if strings.ToLower(k) == "authorization" || strings.ToLower(k) == "token" {
-			for i := range values {
-				rendered[i] = "<redacted>"
-			}
-		} else {
-			copy(rendered, values)
-		}
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString(k)
-		b.WriteString("=")
-		b.WriteString("[")
-		b.WriteString(strings.Join(rendered, ", "))
-		b.WriteString("]")
-	}
-	b.WriteString("}")
-	return b.String()
 }
