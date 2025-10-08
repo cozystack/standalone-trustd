@@ -1,0 +1,54 @@
+apiVersion: kamaji.clastix.io/v1alpha1
+kind: TenantControlPlane
+metadata:
+  annotations:
+    kamaji.clastix.io/kubeconfig-secret-key: super-admin.svc
+  name: kubernetes-foo
+spec:
+  addons:
+    konnectivity:
+      agent:
+        image: registry.k8s.io/kas-network-proxy/proxy-agent
+        tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
+        version: v0.28.6
+      server:
+        image: registry.k8s.io/kas-network-proxy/proxy-server
+        port: 8132
+        version: v0.28.6
+  controlPlane:
+    deployment:
+      podAdditionalMetadata:
+        labels:
+          policy.cozystack.io/allow-to-etcd: "true"
+      registrySettings:
+        apiServerImage: kube-apiserver
+        controllerManagerImage: kube-controller-manager
+        registry: registry.k8s.io
+        schedulerImage: kube-scheduler
+      replicas: 1
+      serviceAccountName: default
+    ingress:
+      additionalMetadata:
+        annotations:
+          nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+      hostname: kubernetes-sadasd.kvaps.dev5.infra.aenix.org:443
+      ingressClassName: tenant-root
+    service:
+      serviceType: ClusterIP
+  dataStore: tenant-root
+  kubernetes:
+    version: v1.33.0
+    kubelet:
+      cgroupfs: systemd
+      preferredAddressTypes:
+      - InternalIP
+      - ExternalIP
+  networkProfile:
+    certSANs:
+    - kubernetes-foo.kvaps.dev5.infra.aenix.org
+    clusterDomain: cluster.local
+    podCidr: 10.243.0.0/16
+    port: 6443
+    serviceCidr: 10.95.0.0/16
