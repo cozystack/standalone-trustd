@@ -7,15 +7,21 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/cozystack/standalone-trustd/internal/registrator"
 	"github.com/cozystack/standalone-trustd/internal/tlsconfig"
@@ -69,9 +75,10 @@ func run() error {
 		return fmt.Errorf("failed to create TLS configuration: %w", err)
 	}
 
-	// Create gRPC server
+	// Create gRPC server with Basic Auth interceptor
 	server := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(tlsConfig)),
+		grpc.UnaryInterceptor(basicAuthInterceptor(*authToken)),
 	)
 
 	// Create registrator
@@ -131,4 +138,49 @@ func createListener(port int) (net.Listener, error) {
 		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
 	return listener, nil
+}
+
+// basicAuthInterceptor enforces Basic auth on incoming RPC calls.
+// Username is ignored; password must equal expectedToken.
+func basicAuthInterceptor(expectedToken string) grpc.UnaryServerInterceptor {
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (interface{}, error) {
+		md, ok := metadata.FromIncomingContext(ctx)
+		if !ok {
+			return nil, status.Error(codes.Unauthenticated, "missing metadata")
+		}
+
+		authHeaders := md.Get("authorization")
+		if len(authHeaders) == 0 {
+			return nil, status.Error(codes.Unauthenticated, "missing authorization header")
+		}
+
+		authHeader := authHeaders[0]
+		if !strings.HasPrefix(strings.ToLower(authHeader), "basic ") {
+			return nil, status.Error(codes.Unauthenticated, "invalid authorization scheme")
+		}
+
+		payload, err := base64.StdEncoding.DecodeString(strings.TrimSpace(authHeader[len("Basic "):]))
+		if err != nil {
+			return nil, status.Error(codes.Unauthenticated, "invalid basic credentials")
+		}
+
+		// format is username:password
+		parts := strings.SplitN(string(payload), ":", 2)
+		if len(parts) != 2 {
+			return nil, status.Error(codes.Unauthenticated, "invalid basic credentials format")
+		}
+
+		// username is ignored; only password must match expected token
+		providedToken := parts[1]
+		if subtle.ConstantTimeCompare([]byte(providedToken), []byte(expectedToken)) != 1 {
+			return nil, status.Error(codes.Unauthenticated, "invalid token")
+		}
+
+		return handler(ctx, req)
+	}
 }

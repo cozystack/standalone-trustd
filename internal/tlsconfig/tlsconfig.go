@@ -7,7 +7,6 @@ package tlsconfig
 
 import (
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"io"
 	"os"
@@ -72,18 +71,12 @@ func (c *TLSConfig) createTLSConfig() (*tls.Config, error) {
 		return nil, fmt.Errorf("failed to parse server certificate and key: %w", err)
 	}
 
-	// Parse accepted CAs
-	caCertPool := x509.NewCertPool()
-	if !caCertPool.AppendCertsFromPEM(c.acceptedCAs) {
-		return nil, fmt.Errorf("failed to parse accepted CAs")
-	}
-
 	// Create TLS configuration
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    caCertPool,
-		MinVersion:   tls.VersionTLS12,
+		// Server-only TLS: no client certificate verification
+		ClientAuth: tls.NoClientCert,
+		MinVersion: tls.VersionTLS12,
 	}
 
 	return tlsConfig, nil
